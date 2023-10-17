@@ -1,0 +1,368 @@
+---
+title: "Bank Customer Churn Prediction"
+author: "WQD 7004 Group 7: S2124360	WONG HUI YEOK, S2111068	NG SIN YU, S2028426	LEE XIN YANG, S2136367	LIM HONG CHUAN, S2136912	CHIN CHEE TENG"
+date: "03/06/2022"
+output: 
+  html_document:
+    theme: readable
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Introduction
+Customer churn has become a major problem in banking industry and banks have always tried to track customer interaction with the company to detect early warning signs in customer's behavior.
+
+Marketing literature states that it is more costly to engage a new customer than to retain an existing loyal customer (Sharma & Kumar Panigrahi, 2011). Khan et al. (2010) state that cost of obtaining new customers is five times higher than retaining existing customers. Therefore, banks need to shift their attention from customer acquisition to customer retention, provide accurate prediction models, and effective churn prediction strategies as customer retention solution, to prevent churn. 
+
+This project aims to present machine learning models that can be used to predict which customers are most likely to churn and how long (years) the customer will stay with the bank. The models were trained with real-life U.S. bank customers dataset.
+
+<style>
+body {
+text-align: justify}
+</style>
+
+### Objectives
+<li>To predict if a bank’s customers will churn or stay with the bank.</li>
+<li>To predict how many years would a customer stay with the bank.</li>
+
+### Workflow Overview
+
+#![The figure above shows workflow of Bank Customers Churn Prediction Model](Work Flow.png){width=50%}
+
+
+## Import Libraries & Dataset
+
+The dataset that will be used in this project is obtained from <https://www.kaggle.com/datasets/shantanudhakadd/bank-customer-churn-prediction?resource=download>.
+Import the dataset into our R markdown.
+
+```{r}
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(printr)
+library(pROC) 
+library(ROCR) 
+library(caret)
+library(car)
+library(rpart)
+library(rpart.plot)
+
+data = read.csv('Churn_Modelling.csv', stringsAsFactors = TRUE)
+```
+
+## Descriptive Statistic 
+By taking a glimpse on our dataset, we have total of 10,000 and 14 columns. Three non-useful variables are identified: **RowNumber**, **CustomerID**, and **Surname**. Two categorical variables: **Geography** and **Gender** need to be encoded into numbers because machine learning models can only work with numerical input.
+
+```{r}
+# show dimension, datatype, content of the data set
+str(data)
+
+```
+
+No missing value is detected for all of the variables.
+```{r}
+# detect missing value
+knitr::kable(sapply(data, function(x) sum(is.na(x))), col.names = c("Missing Value Count"))
+```
+
+This is the summary statistics of the variables. Looking at the Min and Max of the continuous variables, we can see that their scales are different hugely, e.g., **Age** and **EstimatedSalary**. The variables with larger scale would overshadow the smaller scale one, so scaling is needed to scale these variables to the same 0 - 1 range. 
+```{r}
+# show summary statistics of the variables 
+summary(data[, !names(data) %in% c('RowNumber', 'CustomerId', 'Surname')])
+```
+
+Box plot is plotted to show the data distribution of continuous variables and check if there is any outlier. 
+Outliers are detected in **Age** and **CreditScore**, but they are not erroneous outliers and this outlier situation occurs because of the small sample number between these outliers range. **Age**, **CreditScore**, **Balance** variables are skewed toward the majority values while **EstimatedSalary** seems to be normally distributed.  
+Log transformation can be applied to these three variables to solve the skewed and outliers data issues. 
+
+```{r}
+# plot box plot
+data[, names(data) %in% c('Age', 'Balance', 'CreditScore', 'EstimatedSalary')] %>%
+  gather() %>%
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_boxplot() +
+    theme(axis.text.x = element_text(size = 7, angle=90), axis.text.y = element_text(size = 7))
+  
+```
+
+## Data Processing
+The data processing that need to be done include: <br>
+1) Drop **RowNumber**, **CustomerID**, and **Surname**. <br>
+2) Encode **Geography** and **Gender**. <br>
+3) Log Transform **Age**, **CreditScore**, and **Balance**. <br>
+4) Scale range of **Age**, **CreditScore**, **Balance**, **EstimatedSalary** from 0 to 1.
+
+```{r}
+# drop non-useful variables
+data = data[, !names(data) %in% c('RowNumber', 'CustomerId', 'Surname')]
+
+# data encoding
+data$Geography = factor(data$Geography, labels=c(0, 1, 2))
+data$Gender = factor(data$Gender, labels=c(0, 1))
+
+# data transformation
+data$Age = log(data$Age)
+data$CreditScore = log(data$CreditScore)
+data$Balance = log(data$Balance)
+data[data$Balance == -Inf, 'Balance'] <- 0
+
+# scaling
+fun_scale_0to1 <- function(x) {                           
+  (x - min(x)) / (max(x) - min(x))
+}
+data$Age = fun_scale_0to1(data$Age)
+data$CreditScore = fun_scale_0to1(data$CreditScore)
+data$Balance = fun_scale_0to1(data$Balance)
+data$EstimatedSalary = fun_scale_0to1(data$EstimatedSalary)
+
+head(data, 5)
+
+```
+
+## Machine Learning - Classification
+To train a classification model, there is mainly three steps:<br>
+1. Splitting Data into Training and Testing Set<br>
+2. Model Training/ Tuning <br>
+3. Model Testing<br>
+
+The **Exited** variable will be used as the target variable to predict whether a bank customer will churn or not.
+
+**Splitting Data into training set and testing set**
+```{r}
+set.seed(1000)
+trainIndex <- createDataPartition(data$Exited, p = 0.8, list = FALSE, times = 1)
+training_data <- data[ trainIndex,]
+testing_data  <- data[-trainIndex,]
+```
+Data From Traing Set and Testing Set
+```{r}
+# Check if the splitting process is correct
+prop.table(table(training_data$Exited))
+prop.table(table(testing_data$Exited))
+```
+**Model Training**<br>
+**1. Logistic Regression**: <br>
+Logistic regression is a statistical analysis method to predict a binary outcome, such as yes or no, based on prior observations of a data set.<br>
+We will first fit all the features into the logistic regression to identify which are the important feature that contribute to the result.
+```{r}
+LR_model = glm(Exited ~ ., data = training_data, family = "binomial")
+summary(LR_model)
+```
+From the summary above, we can drop feature of **HasCrCard**, **EstimatedSalary** from the training model, thus they're not statistical significance to the target column (p-value > 0.05)
+```{r}
+LR_model = glm(Exited ~ CreditScore + Geography + Gender + Age +Tenure+ Balance + NumOfProducts + IsActiveMember, data = training_data, family = "binomial")
+summary(LR_model)
+```
+After dropping those features, we can notice that the statistical significance of **credit score**,**Geography**, **Gender**,**Balance** has significantly increase. Apart from that, the deviance residuals has also move closer to 0 and AIC reduces as well.<br>
+
+Apart from checking the p-value, we can also check on the VIF of features. Variance inflation factor (VIF) provides a measure of multicollinearity among the independent variables in a multiple regression model. Multicollinearity exist when two/ more predictor are highly relative to each other and it will become difficult to understand the impact of an independent variable. <br>
+
+One of the assumptions fron logistic regression is the feature should be independent.A predictor having a **VIF of 2 or less** is generally considered safe and it can be assumed that it is not correlated with other predictor variables. Higher the VIF, greater is the correlation of the predictor variable with other predictor variables. 
+
+From the result below, all the feature selected is good to use for training the model.
+```{r}
+vif(LR_model)
+```
+**Logistic Regression Result**<br>
+The model has achieved **81%** of accuracy, **70%** of sensitivity and **82.77%** of specificity. The Area Under Curve for this model achieves **80%** which is considered a good result.
+```{r}
+# Performance of model on testing data set
+pred2 <- predict(LR_model,testing_data,type="response")
+cutoff_churn <- ifelse(pred2>=0.50, 1,0)
+cm <- confusionMatrix(as.factor(testing_data$Exited),as.factor(cutoff_churn),positive ='1')
+cm
+
+```
+
+```{r}
+# Plot ROC Curve
+ROCpred = prediction(pred2, testing_data$Exited)
+ROCperf <- performance(ROCpred, "tpr", "fpr")
+plot(ROCperf, colorize=TRUE)
+abline(a=0, b=1)
+auc_train <- round(as.numeric(performance(ROCpred, "auc")@y.values),2)
+legend(.8, .2, auc_train, title = "AUC", cex=1)
+```
+
+**2. Decision Tree**<br>
+A supervised machine learning model that works as flow chat that used to visualize the decision-making process by mapping out different courses of action, as well as their potential outcomes.<br>
+
+We first build the decision tree with all the feature. However, fitting all the features into the model is always not the best choice. From the summary of the model, we obtain the result of CP, which stands for **Complexity Parameter**. It refers to the trade-off between the size of a tree and the error rate that help to prevent overfitting. So we want the cp value of the smallest tree that is having the smallest cross validation error.
+
+```{r} 
+Dtree = rpart(Exited ~., data = training_data, method = "class")
+printcp(Dtree)
+# Plot Full Tree
+prp(Dtree, type = 1, extra = 1, under = TRUE, split.font = 2, varlen = 0) 
+```
+
+Find the best pruned Decision Tree by selecting the tree that is having least cross validation error.
+```{r}
+set.seed(12345)
+cv.ct <- rpart(Exited ~., data = training_data, method = "class", 
+               cp = 0.00001, minsplit = 5, xval = 5)
+printcp(cv.ct)
+```
+From the result above, the CP with value of 2.7933e-03 is having the least cross validation error.
+``` {r}
+# Prune by lowest cp
+prune_dt <- prune(cv.ct,cp=cv.ct$cptable[which.min(cv.ct$cptable[,"xerror"]),"CP"])
+predict_dt <- predict(prune_dt, testing_data,type="class") 
+length(prune_dt$frame$var[prune_dt$frame$var == "<leaf>"])
+prp(prune_dt, type = 1, extra = 1, split.font = 1, varlen = -10)
+cm_dt <- confusionMatrix(as.factor(testing_data$Exited),as.factor(predict_dt),positive='1')
+cm_dt
+```
+**Decision Tree Result**<br>
+The model has achieved **86.4%** of accuracy, **84%** of sensitivity and **86%** of specificity. The Area Under Curve for this model achieves **79%** slightly lower compared to logistic regression.
+```{r}
+pred_dt <- predict(prune_dt, newdata= testing_data,type = "prob")[, 2]
+Pred_val = prediction(pred_dt, testing_data$Exited) 
+plot(performance(Pred_val, "tpr", "fpr"),colorize=TRUE)
+abline(0, 1, lty = 2)
+auc_train <- round(as.numeric(performance(Pred_val, "auc")@y.values),2)
+legend(.8, .2, auc_train, title = "AUC", cex=1)
+```
+
+**3. Support Vector Machine** <br>
+A support vector machine (SVM) is a supervised machine learning model that uses classification algorithms for two-group classification problems<br>
+
+One of the important stuff in building SVM model is feature Scaling. In the previous pre-processing section, we had already normalized all the range of the numeric values. Thus, the data is ready to use to train the model.
+```{r} 
+library(e1071) 
+library(ISLR) 
+learn_svm <- svm(factor(Exited)~.,data=training_data) 
+predict_svm <- predict(learn_svm, testing_data,type ="response") 
+```
+**Support Vector Machine Result**<br>
+The model has achieved **86.45%** of accuracy, **86.38%** of sentivity and **86.46%** of specificity. The Area Under Curve for this model achieves **71%** which is the lowest among all three.
+```{r}
+cm_svm <- confusionMatrix(as.factor(testing_data$Exited),as.factor(predict_svm),positive='1')
+cm_svm$byClass
+pred_ROCR  <- prediction(as.numeric(predict_svm), as.numeric(testing_data$Exited))
+roc_ROCR <- performance(pred_ROCR, measure = "tpr", x.measure = "fpr")
+auc_train <- round(as.numeric(performance(pred_ROCR, "auc")@y.values),2)
+plot(roc_ROCR, main = "ROC curve", colorize = T)
+abline(a = 0, b = 1)
+legend(.8, .2, auc_train, title = "AUC", cex=1)
+```
+
+
+## Machine Learning - Regression
+Similar to training a classification model, there is mainly three steps to train a regression model:<br>
+1. Splitting Data into Training and Testing Set<br>
+2. Model Training<br>
+3. Model Testing<br>
+
+The **Tenure** variable will be used as the target variable to predict how long (year) the bank customer will stay with the bank.
+
+**Splitting Data into training set and testing set**
+```{r}
+set.seed(1000)
+data[, names(data)] = apply(data[, names(data)], 2, function(x) as.numeric(as.character(x)))
+trainIndex <- createDataPartition(data$Tenure, p=0.8, list=FALSE, times=1)
+data_train <- data[trainIndex,]
+data_test <- data[-trainIndex,]
+
+```
+
+**Model Training**<br>
+**1. Linear Regression**
+
+```{r}
+# set method as "lm" to train a linear regression model using the training data.
+linRegModel <- train(Tenure ~., data = data_train, method = "lm")
+summary(linRegModel)
+```
+
+From the summary above, only the **IsActiceMember** variable is statistically significant in predicting the **Tenure** target outcome. The adjusted R-square achieved by the model is **0.0008615**, which is considered extremely low as it is far from the perfect score of 1. 
+
+In the following code, 5-fold cross validation is used for the linear regression model to see if the model performance can be improved. 
+
+```{r}
+# set method as "lm" to train a linear regression model and use 5-fold cross validation on the whole data.
+linRegModelcv <- train(Tenure ~., data = data, method = "lm", trControl = trainControl(method="cv", number=5))
+summary(linRegModelcv$finalModel)
+```
+
+From the summary above, we have now two variables that are statistically significant which are **IsActiveMember** and **HasCrCard**. The adjusted R-square (**0.001179**) is slightly improved but the score achieved is still considered very low.
+
+**Linear Regression Result**<br>
+The linear regression model has achieved RMSE score of **2.945562**.
+```{r}
+# root mean square error function
+rmse = function(actual, predicted) {
+  sqrt(mean((actual - predicted) ^ 2))
+}
+
+# performance of model on testing data set 
+pred_tenure = as.integer(predict(linRegModel, data_test))
+rmse(data_test$Tenure, pred_tenure)
+
+```
+
+
+**2. Regression Tree**
+```{r}
+library(rpart)
+library(rpart.plot)
+
+# set method as anova for regression tree
+modelTree <- rpart(Tenure ~., data= data_train, method="anova")
+summary(modelTree)
+rpart.plot(modelTree)
+
+```
+
+From the model summary and tree plot above, we notice that the regression tree is not able to grow. This happens because the independent variables are not useful in predicting the **Tenure** target outcome, hence the information provided by the independent variables are insufficient to grow the tree.
+
+**Regression Tree Result**<br>
+The regression tree model has achieved RMSE score of **2.894164**. The RMSE score of this model is slightly better than the RMSE of linear regression model. However, neither of the two models achieved a good model performance that is ready for deployment because the independent variables in this data set are not contributing to the prediction of the **Tenure** target variable.
+```{r}
+pred_tenure2 <- as.integer(predict(modelTree,  data_test, type="vector"))
+
+#Accuracy of model on testing data set
+rmse(data_test$Tenure, pred_tenure2)
+```
+
+
+## Conclusion
+
+Some interesting findings in the dataset: 
+
+1. Older customers are churning more than younger ones alluding to a difference in service preference in the age categories. The bank may need to review their target market or review the strategy for retention between the different age groups.
+
+2. Having a credit card is not a good predictor for churn status mainly due to the high credit card ownership in Germany, France and Spain.
+
+3. Credit Score may be perceived as an important factor, but its significance is minimal among the other factors given that the distribution of credit score is similar for churned and retained customers.
+
+4. Clients with the longest and shortest tenure are more likely to churn compared to those that are of average tenure.
+
+5. Surprisingly, the churning customers are also those who have a greater bank balance with the bank. This should be concerning to the bank as they are losing customers that provide higher capitals. 
+
+
+In predicting if a customer will churn or not, we employed 3 types of models: Logistics Regression, Decision Tree and Support Vector Machine. The performances of the models are fairly good with accuracies ranging from 81% - 86%. Other performance metrics that we considered are sensitivity(recall), precision f1-scores and the Area Under Curve of ROC. 
+
+Overall, Decision Tree is the best model for predicting churn among the three models. 
+
+For objective 2, neither of the regression models can a good prediction on how long a bank customer will stay with the bank because the independent variables are not useful in contributing to the prediction of our **Tenure** target variable.
+
+Recommendations: 
+
+Regression works better with more continuous data as features. Active Member status is quite arbitrary and it is better to replaced with other useful features such as Recency, Frequency and Lifetime Value of customers that captures customer behaviour in interacting with the services provided by the bank. 
+
+Through this project, we learn that a good quality data set is important as it directly influence the performance of machine learning models and the independent variables have to be relevant in order to contribute to the prediction of the target variable.
+
+
+
+
+## References
+
+Khan, A. A., Jamwal, S., & Sepehri, M. M. (2010). Applying Data Mining to Customer Churn Prediction in an Internet Service Provider. *International Journal of Computer Applications*, 9(7), 8–14. https://doi.org/10.5120/1400-1889
+
+Sharma, A., & Kumar Panigrahi, P. (2011). A Neural Network based Approach for Predicting Customer Churn in Cellular Network Services. *International Journal of Computer Applications*, 27(11), 26–31. https://doi.org/10.5120/3344-4605
+
